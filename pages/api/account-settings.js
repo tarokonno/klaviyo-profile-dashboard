@@ -1,72 +1,80 @@
-import fs from 'fs';
-import path from 'path';
+import { getAccountSettings, saveAccountSettings, getAllAccounts } from '../../lib/utils';
 
 export default async function handler(req, res) {
   if (req.method === 'GET') {
     try {
-      const settingsPath = path.join(process.cwd(), 'data', 'account-settings.json');
-      console.log('GET request - Retrieved settings');
-      
-      if (fs.existsSync(settingsPath)) {
-        const settingsData = fs.readFileSync(settingsPath, 'utf8');
-        const settings = JSON.parse(settingsData);
-        const { privateApiKey, ...safeSettings } = settings;
-        res.status(200).json(safeSettings);
-      } else {
-        res.status(404).json({ error: 'No account settings found' });
-      }
+      const accounts = getAllAccounts();
+      res.status(200).json({ accounts });
     } catch (error) {
       console.error('Error getting account settings:', error);
       res.status(500).json({ error: 'Failed to get account settings' });
     }
   } else if (req.method === 'POST') {
     try {
-      const settings = req.body;
-      console.log('POST request received - Body size:', JSON.stringify(settings).length, 'bytes');
-      console.log('POST request - Settings received:', Object.keys(settings));
-      console.log('Request headers size:', JSON.stringify(req.headers).length, 'bytes');
+      const { action, account } = req.body;
       
-      const { privateApiKey, publicApiKey, accountName } = settings;
-      
-      console.log('Extracted settings:', {
-        privateKeyLength: privateApiKey?.length || 0,
-        publicKeyLength: publicApiKey?.length || 0,
-        accountName: accountName
-      });
-      
-      if (!privateApiKey || !publicApiKey) {
-        return res.status(400).json({ error: 'Both private and public API keys are required' });
+      if (action === 'add') {
+        const { privateApiKey, publicApiKey, accountName } = account || {};
+        if (!privateApiKey || !publicApiKey) {
+          return res.status(400).json({ error: 'Both private and public API keys are required' });
+        }
+        
+        const settings = getAccountSettings();
+        const accounts = settings.accounts || [];
+        const id = publicApiKey;
+        
+        if (accounts.some(a => a.id === id || a.publicApiKey === publicApiKey)) {
+          return res.status(400).json({ error: 'An account with this public API key already exists' });
+        }
+        
+        accounts.push({ id, publicApiKey, privateApiKey, accountName: accountName || '' });
+        saveAccountSettings({ accounts });
+        const { privateApiKey: _, ...safeAccount } = accounts[accounts.length - 1];
+        return res.status(200).json({ account: safeAccount });
       }
       
-      const settingsToSave = { privateApiKey, publicApiKey, accountName };
-      const settingsPath = path.join(process.cwd(), 'data', 'account-settings.json');
-      
-      // Create data directory if it doesn't exist
-      const dataDir = path.dirname(settingsPath);
-      if (!fs.existsSync(dataDir)) {
-        fs.mkdirSync(dataDir, { recursive: true });
+      if (action === 'update') {
+        const { id, privateApiKey, publicApiKey, accountName } = account || {};
+        if (!id) return res.status(400).json({ error: 'Account id is required' });
+        
+        const settings = getAccountSettings();
+        const accounts = settings.accounts || [];
+        const idx = accounts.findIndex(a => a.id === id);
+        if (idx === -1) return res.status(404).json({ error: 'Account not found' });
+        
+        if (privateApiKey) accounts[idx].privateApiKey = privateApiKey;
+        if (publicApiKey) {
+          accounts[idx].publicApiKey = publicApiKey;
+          accounts[idx].id = publicApiKey;
+        }
+        if (accountName !== undefined) accounts[idx].accountName = accountName;
+        saveAccountSettings({ accounts });
+        const { privateApiKey: _, ...safeAccount } = accounts[idx];
+        return res.status(200).json({ account: safeAccount });
       }
       
-      fs.writeFileSync(settingsPath, JSON.stringify(settingsToSave, null, 2));
+      if (action === 'delete') {
+        const { id } = account || req.body;
+        if (!id) return res.status(400).json({ error: 'Account id is required' });
+        
+        const settings = getAccountSettings();
+        const accounts = (settings.accounts || []).filter(a => a.id !== id && a.publicApiKey !== id);
+        if (accounts.length === settings.accounts?.length) {
+          return res.status(404).json({ error: 'Account not found' });
+        }
+        saveAccountSettings({ accounts });
+        return res.status(200).json({ message: 'Account removed' });
+      }
       
-      const { privateApiKey: _, ...safeSettings } = settingsToSave;
-      console.log('Settings saved successfully');
-      res.status(200).json(safeSettings);
+      return res.status(400).json({ error: 'Invalid action. Use add, update, or delete.' });
     } catch (error) {
       console.error('Error saving account settings:', error);
       res.status(500).json({ error: 'Failed to save account settings' });
     }
   } else if (req.method === 'DELETE') {
     try {
-      const settingsPath = path.join(process.cwd(), 'data', 'account-settings.json');
-      console.log('DELETE request - Clearing settings');
-      
-      if (fs.existsSync(settingsPath)) {
-        fs.unlinkSync(settingsPath);
-        console.log('Settings file deleted successfully');
-      }
-      
-      res.status(200).json({ message: 'Account settings cleared successfully' });
+      saveAccountSettings({ accounts: [] });
+      res.status(200).json({ message: 'All account settings cleared successfully' });
     } catch (error) {
       console.error('Error clearing account settings:', error);
       res.status(500).json({ error: 'Failed to clear account settings' });
@@ -74,4 +82,4 @@ export default async function handler(req, res) {
   } else {
     res.status(405).json({ error: 'Method not allowed' });
   }
-} 
+}

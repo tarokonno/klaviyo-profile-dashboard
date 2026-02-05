@@ -12,18 +12,9 @@ function extractCursor(nextUrl) {
   }
 }
 
-const METRIC_REFRESH_INTERVAL = 10 * 60 * 1000; // 10 minutes
-let metricIdToName = {};
-let metricNameToId = {};
-
-async function fetchAndCacheMetrics() {
+async function resolveMetricNameToId(metric_name, privateApiKey) {
+  if (!metric_name || !privateApiKey) return null;
   try {
-    const privateApiKey = getPrivateApiKey();
-    if (!privateApiKey) {
-      console.error('No API key configured for metrics caching');
-      return;
-    }
-
     const headers = {
       Authorization: `Klaviyo-API-Key ${privateApiKey}`,
       Accept: 'application/json',
@@ -31,31 +22,22 @@ async function fetchAndCacheMetrics() {
     };
     const response = await axios.get('https://a.klaviyo.com/api/metrics?fields[metric]=name', { headers });
     const metrics = response.data.data || [];
-    metricIdToName = {};
-    metricNameToId = {};
-    for (const m of metrics) {
-      metricIdToName[m.id] = m.attributes.name;
-      metricNameToId[m.attributes.name] = m.id;
-    }
-    console.log(`[Klaviyo] Cached ${metrics.length} metrics.`);
-  } catch (err) {
-    console.error('Error fetching Klaviyo metrics:', err.stack || err);
+    const m = metrics.find(x => x.attributes?.name === metric_name);
+    return m ? m.id : null;
+  } catch {
+    return null;
   }
 }
-
-// Initial fetch and periodic refresh
-fetchAndCacheMetrics();
-setInterval(fetchAndCacheMetrics, METRIC_REFRESH_INTERVAL);
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { profile_id, metric_id, metric_name } = req.query;
+  const { profile_id, metric_id, metric_name, account_id, accountId } = req.query;
+  const effectiveAccountId = account_id || accountId || null;
   
-  // Get the private API key from saved settings
-  const privateApiKey = getPrivateApiKey();
+  const privateApiKey = getPrivateApiKey(effectiveAccountId);
   
   if (!privateApiKey) {
     console.error('No API key configured for events');
@@ -72,16 +54,17 @@ export default async function handler(req, res) {
     Accept: 'application/json',
     Revision: '2025-04-15',
   };
-  // Start with all query params from frontend
-  const params = { ...req.query };
+  // Start with query params but exclude account_id (internal only - Klaviyo API rejects it)
+  const { account_id: _a1, accountId: _a2, ...queryParams } = req.query;
+  const params = { ...queryParams };
   // Always set page_size to 100 unless overridden
   params.page_size = params.page_size || 100;
   // Build filter string as before
   let filter = [];
   if (profile_id) filter.push(`equals(profile_id,\"${profile_id}\")`);
   let effectiveMetricId = metric_id;
-  if (!effectiveMetricId && metric_name && metricNameToId[metric_name]) {
-    effectiveMetricId = metricNameToId[metric_name];
+  if (!effectiveMetricId && metric_name) {
+    effectiveMetricId = await resolveMetricNameToId(metric_name, privateApiKey);
   }
   if (effectiveMetricId) filter.push(`equals(metric_id,\"${effectiveMetricId}\")`);
   if (filter.length > 0) params.filter = filter.join(',');

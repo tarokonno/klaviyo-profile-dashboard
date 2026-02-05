@@ -2,16 +2,14 @@ import axios from 'axios';
 import { getPrivateApiKey } from '../../../lib/utils';
 
 const METRIC_REFRESH_INTERVAL = 10 * 60 * 1000; // 10 minutes
-let metricIdToName = {};
-let metricNameToId = {};
-let allMetrics = [];
+const metricCache = {}; // accountId -> { metricIdToName, metricNameToId, allMetrics }
 
-async function fetchAndCacheMetrics() {
+async function fetchAndCacheMetricsForAccount(accountId) {
   try {
-    const privateApiKey = getPrivateApiKey();
+    const privateApiKey = getPrivateApiKey(accountId);
     if (!privateApiKey) {
       console.error('No API key configured for metrics caching');
-      return;
+      return null;
     }
 
     const headers = {
@@ -21,56 +19,69 @@ async function fetchAndCacheMetrics() {
     };
     const response = await axios.get('https://a.klaviyo.com/api/metrics?fields[metric]=name', { headers });
     const metrics = response.data.data || [];
-    metricIdToName = {};
-    metricNameToId = {};
-    allMetrics = [];
+    const metricIdToName = {};
+    const metricNameToId = {};
+    const allMetrics = [];
     
     for (const m of metrics) {
       metricIdToName[m.id] = m.attributes.name;
       metricNameToId[m.attributes.name] = m.id;
-      allMetrics.push({
-        id: m.id,
-        name: m.attributes.name
-      });
+      allMetrics.push({ id: m.id, name: m.attributes.name });
     }
-    console.log(`[Klaviyo] Cached ${metrics.length} metrics.`);
-    console.log(`[Klaviyo] allMetrics array length: ${allMetrics.length}`);
+    
+    const key = accountId || '__default__';
+    metricCache[key] = { metricIdToName, metricNameToId, allMetrics, lastFetch: Date.now() };
+    console.log(`[Klaviyo] Cached ${metrics.length} metrics for account ${key}`);
+    return metricCache[key];
   } catch (err) {
     console.error('Error fetching Klaviyo metrics:', err.stack || err);
+    return null;
   }
 }
 
-// Initial fetch and periodic refresh
-let isInitialized = false;
-
-async function initializeMetrics() {
-  await fetchAndCacheMetrics();
-  isInitialized = true;
+function getCachedMetrics(accountId) {
+  const key = accountId || '__default__';
+  const cached = metricCache[key];
+  if (cached && Date.now() - cached.lastFetch < METRIC_REFRESH_INTERVAL) {
+    return cached;
+  }
+  return null;
 }
-
-initializeMetrics();
-setInterval(fetchAndCacheMetrics, METRIC_REFRESH_INTERVAL);
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
+  const accountId = req.query.account_id || req.query.accountId || null;
+
   try {
-    // Wait for initial metrics to be loaded
-    if (!isInitialized) {
-      console.log('Waiting for metrics to initialize...');
-      await initializeMetrics();
+    let data = getCachedMetrics(accountId);
+    if (!data) {
+      data = await fetchAndCacheMetricsForAccount(accountId);
     }
     
-    console.log(`Returning metrics: ${allMetrics.length} metrics available`);
+    if (!data) {
+      return res.status(500).json({
+        error: 'No API key configured or failed to fetch metrics',
+        metricIdToName: {},
+        metricNameToId: {},
+        allMetrics: []
+      });
+    }
+    
     res.json({
-      metricIdToName,
-      metricNameToId,
-      allMetrics
+      metricIdToName: data.metricIdToName,
+      metricNameToId: data.metricNameToId,
+      allMetrics: data.allMetrics
     });
   } catch (error) {
     console.error('Error getting metrics:', error);
-    res.status(500).json({ error: 'Failed to get metrics' });
+    res.status(500).json({
+      error: error.message,
+      metricIdToName: {},
+      metricNameToId: {},
+      allMetrics: []
+    });
   }
-} 
+}

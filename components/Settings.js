@@ -15,16 +15,19 @@ export default function Settings({ onBack, activeTab = 'account' }) {
   });
   const [loading, setLoading] = useState(true);
   const [activeTabState, setActiveTabState] = useState(activeTab);
-  const [accountSettings, setAccountSettings] = useState({
+  const [accountForm, setAccountForm] = useState({
     privateApiKey: '',
     publicApiKey: '',
     accountName: ''
   });
   const [savingAccount, setSavingAccount] = useState(false);
   const [accountError, setAccountError] = useState('');
-  const [savedAccountSettings, setSavedAccountSettings] = useState(null);
-  const [showPrivateKey, setShowPrivateKey] = useState(false);
+  const [savedAccounts, setSavedAccounts] = useState([]);
+  const [showAddAccountModal, setShowAddAccountModal] = useState(false);
+  const [showViewModal, setShowViewModal] = useState(null);
+  const [showEditModal, setShowEditModal] = useState(null);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [metricsAccountId, setMetricsAccountId] = useState(null);
   const [loadingMetrics, setLoadingMetrics] = useState(false);
   const [showClearConfirmModal, setShowClearConfirmModal] = useState(false);
   const [clearConfirmStep, setClearConfirmStep] = useState('confirm'); // 'confirm' or 'success'
@@ -32,14 +35,11 @@ export default function Settings({ onBack, activeTab = 'account' }) {
   useEffect(() => {
     const initializeSettings = async () => {
       try {
-        // First load account settings
-        await loadAccountSettings();
-        
-        // If metrics tab is active, load metrics immediately
-        if (activeTab === 'metrics') {
-          await loadMetrics();
+        const accts = await loadAccountSettings();
+        if (activeTab === 'metrics' && accts.length > 0) {
+          setMetricsAccountId(accts[0].id);
+          await loadMetrics(accts[0].id);
         }
-        
         setLoading(false);
       } catch (error) {
         console.error('Error initializing settings:', error);
@@ -50,50 +50,52 @@ export default function Settings({ onBack, activeTab = 'account' }) {
     initializeSettings();
   }, [activeTab]);
 
-  // Load metrics when switching to metrics tab
   const handleTabChange = (tab) => {
     setActiveTabState(tab);
-    if (tab === 'metrics') {
-      loadMetrics();
+    if (tab === 'metrics' && savedAccounts.length > 0) {
+      const id = metricsAccountId || savedAccounts[0]?.id;
+      if (id) {
+        setMetricsAccountId(id);
+        loadMetrics(id);
+      }
     }
   };
 
-  // Load saved account settings from server only
   const loadAccountSettings = async () => {
     try {
-      const serverResponse = await axios.get('/api/account-settings-display');
-      if (serverResponse.data) {
-        // Store the complete saved settings (including private key for display)
-        setSavedAccountSettings(serverResponse.data);
-        
-        // Don't populate the private API key field for security (input stays empty)
-        setAccountSettings({
-          privateApiKey: '', // Keep empty for security
-          publicApiKey: serverResponse.data.publicApiKey || '',
-          accountName: serverResponse.data.accountName || '',
-        });
-      }
+      const serverResponse = await axios.get('/api/account-settings');
+      const accts = serverResponse.data?.accounts || [];
+      setSavedAccounts(accts);
+      setAccountForm({ privateApiKey: '', publicApiKey: '', accountName: '' });
+      setShowAddAccountModal(false);
+      setShowEditModal(null);
+      return accts;
     } catch (error) {
       console.error('Error loading account settings:', error);
+      setSavedAccounts([]);
+      return [];
     }
   };
 
-  // Load metrics separately
-  const loadMetrics = async () => {
+  // Load metrics for selected account
+  const loadMetrics = async (accountId = null) => {
     try {
       setLoadingMetrics(true);
-      const res = await axios.get('/api/events/metrics');
-      const data = res.data;
-      setAllMetrics(data.allMetrics || []);
-      
-      // Load saved mapping from server only
-      try {
-        const mappingResponse = await axios.get('/api/settings/metric-mapping');
-        if (mappingResponse.data) {
-          setMetricMapping(mappingResponse.data);
-        }
-      } catch (error) {
-        console.error('Error loading metric mapping:', error);
+      const url = accountId ? `/api/events/metrics?account_id=${encodeURIComponent(accountId)}` : '/api/events/metrics';
+      const res = await axios.get(url);
+      setAllMetrics((res.data?.allMetrics || []));
+      if (accountId) {
+        const mapRes = await axios.get(`/api/settings/metric-mapping?account_id=${encodeURIComponent(accountId)}`);
+        const m = mapRes.data?.mapping || mapRes.data || {};
+        setMetricMapping({
+          received: m.received || '',
+          opened: m.opened || '',
+          clicked: m.clicked || '',
+          placedOrder: m.placedOrder || '',
+          productsOrdered: m.productsOrdered || '',
+          smsReceived: m.smsReceived || '',
+          smsClicked: m.smsClicked || '',
+        });
       }
     } catch (error) {
       console.error('Error loading metrics:', error);
@@ -104,10 +106,16 @@ export default function Settings({ onBack, activeTab = 'account' }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (!metricsAccountId) {
+      alert('Please select an account first.');
+      return;
+    }
     try {
-      // Save metric mapping to server
-      await axios.post('/api/settings/metric-mapping', metricMapping);
-      alert('Settings saved!');
+      await axios.post('/api/settings/metric-mapping', {
+        account_id: metricsAccountId,
+        mapping: metricMapping,
+      });
+      alert('Metric settings saved for this account!');
     } catch (error) {
       console.error('Error saving metric mapping:', error);
       alert('Error saving settings. Please try again.');
@@ -121,23 +129,17 @@ export default function Settings({ onBack, activeTab = 'account' }) {
     }));
   };
 
-  const handleAccountChange = (field, value) => {
-    setAccountSettings(prev => ({
-      ...prev,
-      [field]: value
-    }));
+  const setAccountFormField = (field, value) => {
+    setAccountForm(prev => ({ ...prev, [field]: value }));
   };
 
   const handleClearAccountSettings = async () => {
     try {
-      // Delete the settings file
       await axios.delete('/api/account-settings');
-      setSavedAccountSettings(null);
-      setAccountSettings({
-        privateApiKey: '',
-        publicApiKey: '',
-        accountName: ''
-      });
+      setSavedAccounts([]);
+      setAccountForm({ privateApiKey: '', publicApiKey: '', accountName: '' });
+      setShowAddAccountModal(false);
+      setShowEditModal(null);
       setClearConfirmStep('success');
     } catch (error) {
       console.error('Error clearing account settings:', error);
@@ -145,102 +147,88 @@ export default function Settings({ onBack, activeTab = 'account' }) {
     }
   };
 
-  const handleSaveAccountSettings = async () => {
-    // Validate required fields
-    if (!accountSettings.privateApiKey.trim() || !accountSettings.publicApiKey.trim()) {
+  const handleAddAccount = async () => {
+    if (!accountForm.privateApiKey.trim() || !accountForm.publicApiKey.trim()) {
       setAccountError('Both Private API Key and Public API Key are required.');
       return;
     }
-
     setSavingAccount(true);
     setAccountError('');
-
     try {
-      // Call Klaviyo API to get account details
       const response = await axios.get('/api/account', {
-        params: {
-          publicKey: accountSettings.publicApiKey,
-          privateKey: accountSettings.privateApiKey
-        }
+        params: { publicKey: accountForm.publicApiKey, privateKey: accountForm.privateApiKey }
       });
-
-      // Check for the correct response structure: response.data.data.attributes
-      if (response.data && response.data.data && response.data.data.attributes && response.data.data.attributes.contact_information) {
-        const organizationName = response.data.data.attributes.contact_information.organization_name;
-        
-        console.log('Account validation successful, organization name:', organizationName);
-        
-        setAccountSettings(prev => ({
-          ...prev,
-          accountName: organizationName
-        }));
-        
-        // Save to server only - never to localStorage
-        try {
-          // Test with simple endpoint first
-          console.log('Testing simple endpoint...');
-          const testData = {
-            privateApiKey: accountSettings.privateApiKey,
-            publicApiKey: accountSettings.publicApiKey,
-            accountName: organizationName
-          };
-          
-          try {
-            const testResponse = await axios.post('/api/test-save', testData);
-            console.log('Test endpoint successful:', testResponse.data);
-          } catch (testError) {
-            console.error('Test endpoint failed:', testError.response?.status, testError.response?.data);
-          }
-          
-          // Try the simplest approach first - just send everything normally
-          const saveData = {
-            privateApiKey: accountSettings.privateApiKey,
-            publicApiKey: accountSettings.publicApiKey,
-            accountName: organizationName
-          };
-          
-          console.log('Sending complete save data:', {
-            privateKeyLength: accountSettings.privateApiKey?.length || 0,
-            publicKeyLength: accountSettings.publicApiKey?.length || 0,
-            accountName: organizationName,
-            totalSize: JSON.stringify(saveData).length + ' bytes'
-          });
-          
-          try {
-            const saveResponse = await axios.post('/api/account-settings', saveData);
-            console.log('Settings saved successfully:', saveResponse.status);
-          } catch (saveError) {
-            console.error('Error saving settings:', saveError.response?.status, saveError.response?.data);
-            console.error('Full error:', saveError);
-            throw saveError;
-          }
-          
-        } catch (saveError) {
-          console.error('Error saving settings:', saveError.response?.status, saveError.response?.data);
-          console.error('Full error:', saveError);
-          throw saveError;
-        }
-        
-        // Clear the private API key field for security
-        setAccountSettings(prev => ({
-          ...prev,
-          privateApiKey: ''
-        }));
-        
-        // Reload saved settings to show the read-only view
-        await loadAccountSettings();
-        
-        // Show success modal
-        setShowSuccessModal(true);
-      } else {
-        setAccountError('Unable to retrieve account information. Please check your API keys.');
-      }
+      const orgName = response.data?.data?.attributes?.contact_information?.organization_name || '';
+      await axios.post('/api/account-settings', {
+        action: 'add',
+        account: { privateApiKey: accountForm.privateApiKey, publicApiKey: accountForm.publicApiKey, accountName: orgName }
+      });
+      setAccountForm({ privateApiKey: '', publicApiKey: '', accountName: '' });
+      setShowAddAccountModal(false);
+      await loadAccountSettings();
+      setShowSuccessModal(true);
     } catch (error) {
-      console.error('Error saving account settings:', error);
-      setAccountError('Error saving account settings. Please check your API keys and try again.');
+      setAccountError(error.response?.data?.error || 'Please check your API keys and try again.');
     } finally {
       setSavingAccount(false);
     }
+  };
+
+  const handleUpdateAccount = async () => {
+    const acc = showEditModal;
+    if (!acc) return;
+    const newName = accountForm.accountName?.trim();
+    const newPrivate = accountForm.privateApiKey?.trim();
+    const newPublic = accountForm.publicApiKey?.trim();
+    if (!newName && !newPrivate && !newPublic) {
+      setShowEditModal(null);
+      return;
+    }
+    setSavingAccount(true);
+    setAccountError('');
+    try {
+      if (newPrivate && newPublic) {
+        const response = await axios.get('/api/account', {
+          params: { publicKey: newPublic, privateKey: newPrivate }
+        });
+        const orgName = response.data?.data?.attributes?.contact_information?.organization_name || newName || acc.accountName;
+        await axios.post('/api/account-settings', {
+          action: 'update',
+          account: { id: acc.id, privateApiKey: newPrivate, publicApiKey: newPublic, accountName: orgName }
+        });
+      } else if (newName !== undefined) {
+        await axios.post('/api/account-settings', {
+          action: 'update',
+          account: { id: acc.id, accountName: newName || acc.accountName }
+        });
+      }
+      setAccountForm({ privateApiKey: '', publicApiKey: '', accountName: '' });
+      setShowEditModal(null);
+      await loadAccountSettings();
+      setShowSuccessModal(true);
+    } catch (error) {
+      setAccountError(error.response?.data?.error || 'Failed to update account.');
+    } finally {
+      setSavingAccount(false);
+    }
+  };
+
+  const handleDeleteAccount = async (accountId) => {
+    if (!confirm('Remove this Klaviyo account? You will need to re-add it to access its data.')) return;
+    try {
+      await axios.post('/api/account-settings', { action: 'delete', account: { id: accountId } });
+      await loadAccountSettings();
+      setShowViewModal(prev => prev?.id === accountId ? null : prev);
+      setShowEditModal(prev => prev?.id === accountId ? null : prev);
+    } catch (error) {
+      alert(error.response?.data?.error || 'Failed to remove account.');
+    }
+  };
+
+  const openEditModal = (acc) => {
+    setShowEditModal(acc);
+    setAccountForm({ privateApiKey: '', publicApiKey: '', accountName: acc.accountName || '' });
+    setAccountError('');
   };
 
   // Convert metrics to dropdown options format
@@ -296,147 +284,148 @@ export default function Settings({ onBack, activeTab = 'account' }) {
 
       {/* Account Settings Tab */}
       {activeTabState === 'account' && (
-        <div className="max-w-2xl mx-auto bg-white rounded-lg shadow p-6">
-          <h2 className="text-lg font-semibold mb-4">Account Settings</h2>
-          
-          {accountError && (
-            <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded">
-              {accountError}
+        <div className="max-w-4xl mx-auto bg-white rounded-lg shadow p-6">
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="text-lg font-semibold">Account Settings</h2>
+            <button
+              type="button"
+              onClick={() => { setShowAddAccountModal(true); setAccountError(''); setAccountForm({ privateApiKey: '', publicApiKey: '', accountName: '' }); }}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              Add Account
+            </button>
+          </div>
+
+          {savedAccounts.length === 0 ? (
+            <div className="text-center py-12 bg-gray-50 rounded-lg">
+              <p className="text-gray-500 mb-4">No Klaviyo accounts connected yet.</p>
+              <button
+                type="button"
+                onClick={() => setShowAddAccountModal(true)}
+                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+              >
+                Add your first account
+              </button>
             </div>
+          ) : (
+            <>
+              <div className="overflow-x-auto rounded-lg border border-gray-200">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Account Name</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Public API Key</th>
+                      <th className="px-6 py-3 text-right text-xs font-semibold text-gray-700 uppercase">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {savedAccounts.map((acc) => (
+                      <tr key={acc.id} className="hover:bg-gray-50">
+                        <td className="px-6 py-4 text-sm font-medium text-gray-900">{acc.accountName || '—'}</td>
+                        <td className="px-6 py-4 text-sm text-gray-600 font-mono">{acc.publicApiKey ? `${acc.publicApiKey.slice(0, 12)}...` : '—'}</td>
+                        <td className="px-6 py-4 text-right">
+                          <button onClick={() => setShowViewModal(acc)} className="text-blue-600 hover:underline mr-4">View</button>
+                          <button onClick={() => openEditModal(acc)} className="text-blue-600 hover:underline mr-4">Edit</button>
+                          <button onClick={() => handleDeleteAccount(acc.id)} className="text-red-600 hover:underline">Delete</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <button
+                type="button"
+                onClick={() => { setShowClearConfirmModal(true); setClearConfirmStep('confirm'); }}
+                className="mt-4 px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded"
+              >
+                Clear all accounts
+              </button>
+            </>
           )}
-          
-          <div className="space-y-4">
-            {/* Display Saved Settings */}
-            {savedAccountSettings ? (
-              <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
-                <h3 className="text-md font-semibold mb-3 text-green-800">Saved API Keys</h3>
-                <div className="space-y-3">
+
+          {/* Add Account Modal */}
+          {showAddAccountModal && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+              <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4 shadow-xl">
+                <h3 className="text-lg font-semibold mb-4">Add Klaviyo Account</h3>
+                {accountError && (
+                  <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded text-sm">{accountError}</div>
+                )}
+                <div className="space-y-4">
                   <div>
-                    <label className="block text-sm font-medium text-green-700 mb-1">Account Name</label>
-                    <div className="text-sm text-green-800 bg-white px-3 py-2 rounded border">
-                      {savedAccountSettings.accountName || 'Not set'}
-                    </div>
+                    <label className="block text-sm font-medium mb-1">Private API Key *</label>
+                    <input type="password" value={accountForm.privateApiKey} onChange={(e) => setAccountFormField('privateApiKey', e.target.value)} className="border rounded px-3 py-2 w-full" placeholder="pk_..." required />
                   </div>
-                  
                   <div>
-                    <label className="block text-sm font-medium text-green-700 mb-1">Public API Key</label>
-                    <div className="text-sm text-green-800 bg-white px-3 py-2 rounded border font-mono">
-                      {savedAccountSettings.publicApiKey || 'Not set'}
-                    </div>
+                    <label className="block text-sm font-medium mb-1">Public API Key *</label>
+                    <input type="password" value={accountForm.publicApiKey} onChange={(e) => setAccountFormField('publicApiKey', e.target.value)} className="border rounded px-3 py-2 w-full" placeholder="Pe..." required />
                   </div>
-                  
                   <div>
-                    <label className="block text-sm font-medium text-green-700 mb-1">Private API Key</label>
-                    <div className="flex items-center gap-2">
-                      <div className="text-sm text-green-800 bg-white px-3 py-2 rounded border font-mono flex-1">
-                        {showPrivateKey 
-                          ? (savedAccountSettings.privateApiKey || 'Not set')
-                          : '••••••••••••••••••••••••••••••••••••••••'
-                        }
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowPrivateKey(!showPrivateKey)}
-                        className="px-3 py-2 text-sm bg-green-600 text-white rounded hover:bg-green-700"
-                      >
-                        {showPrivateKey ? 'Hide' : 'Show'}
-                      </button>
-                    </div>
+                    <label className="block text-sm font-medium mb-1">Account Name</label>
+                    <input type="text" value={accountForm.accountName} className="border rounded px-3 py-2 w-full bg-gray-50" placeholder="Auto-filled after validation" readOnly />
                   </div>
                 </div>
-                <p className="text-xs text-green-600 mt-2">
-                  ✅ Your API keys are saved and being used by the dashboard
-                </p>
-                
-                <div className="mt-4 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowClearConfirmModal(true);
-                      setClearConfirmStep('confirm');
-                    }}
-                    className="px-3 py-2 text-sm bg-red-600 text-white rounded hover:bg-red-700"
-                  >
-                    Clear Settings
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAccountSettings({
-                        privateApiKey: savedAccountSettings.privateApiKey || '',
-                        publicApiKey: savedAccountSettings.publicApiKey || '',
-                        accountName: savedAccountSettings.accountName || ''
-                      });
-                      setSavedAccountSettings(null);
-                    }}
-                    className="px-3 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
-                  >
-                    Edit Settings
+                <div className="flex justify-end gap-2 mt-6">
+                  <button type="button" onClick={() => { setShowAddAccountModal(false); setAccountError(''); }} className="px-4 py-2 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+                  <button type="button" onClick={handleAddAccount} disabled={savingAccount} className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
+                    {savingAccount ? 'Adding...' : 'Add Account'}
                   </button>
                 </div>
               </div>
-            ) : (
-              /* Input fields for new settings */
-              <>
-                <div>
-                  <label className="block font-medium mb-1">Private API Key *</label>
-                  <input 
-                    type="password" 
-                    value={accountSettings.privateApiKey}
-                    onChange={(e) => handleAccountChange('privateApiKey', e.target.value)}
-                    className="border rounded px-3 py-2 w-full"
-                    placeholder="Enter your private API key"
-                    required
-                  />
-                  <p className="text-sm text-gray-500 mt-1">Required for accessing Klaviyo data</p>
+            </div>
+          )}
+
+          {/* View Account Modal */}
+          {showViewModal && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+              <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4 shadow-xl">
+                <h3 className="text-lg font-semibold mb-4">Account Details</h3>
+                <dl className="space-y-2 text-sm">
+                  <div><dt className="text-gray-500">Account Name</dt><dd className="font-medium">{showViewModal.accountName || '—'}</dd></div>
+                  <div><dt className="text-gray-500">Public API Key</dt><dd className="font-mono break-all">{showViewModal.publicApiKey || '—'}</dd></div>
+                </dl>
+                <div className="flex justify-end mt-6">
+                  <button type="button" onClick={() => setShowViewModal(null)} className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Close</button>
                 </div>
-                
-                <div>
-                  <label className="block font-medium mb-1">Public API Key *</label>
-                  <input 
-                    type="password" 
-                    value={accountSettings.publicApiKey}
-                    onChange={(e) => handleAccountChange('publicApiKey', e.target.value)}
-                    className="border rounded px-3 py-2 w-full"
-                    placeholder="Enter your public API key"
-                    required
-                  />
-                  <p className="text-sm text-gray-500 mt-1">Required for account information</p>
+              </div>
+            </div>
+          )}
+
+          {/* Edit Account Modal */}
+          {showEditModal && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+              <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4 shadow-xl">
+                <h3 className="text-lg font-semibold mb-4">Edit Account</h3>
+                {accountError && (
+                  <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded text-sm">{accountError}</div>
+                )}
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Account Name</label>
+                    <input type="text" value={accountForm.accountName} onChange={(e) => setAccountFormField('accountName', e.target.value)} className="border rounded px-3 py-2 w-full" />
+                  </div>
+                  <p className="text-xs text-gray-500">To update API keys, enter new values below. Leave blank to keep current.</p>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">New Private API Key</label>
+                    <input type="password" value={accountForm.privateApiKey} onChange={(e) => setAccountFormField('privateApiKey', e.target.value)} className="border rounded px-3 py-2 w-full" placeholder="Leave blank to keep" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">New Public API Key</label>
+                    <input type="password" value={accountForm.publicApiKey} onChange={(e) => setAccountFormField('publicApiKey', e.target.value)} className="border rounded px-3 py-2 w-full" placeholder="Leave blank to keep" />
+                  </div>
                 </div>
-                
-                <div>
-                  <label className="block font-medium mb-1">Account Name</label>
-                  <input 
-                    type="text" 
-                    value={accountSettings.accountName}
-                    className="border rounded px-3 py-2 w-full bg-gray-50"
-                    placeholder="Will be populated automatically when API keys are saved"
-                    readOnly
-                  />
-                  <p className="text-sm text-gray-500 mt-1">Auto-populated from your Klaviyo account</p>
+                <div className="flex justify-end gap-2 mt-6">
+                  <button type="button" onClick={() => { setShowEditModal(null); setAccountError(''); }} className="px-4 py-2 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+                  <button type="button" onClick={handleUpdateAccount} disabled={savingAccount} className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
+                    {savingAccount ? 'Saving...' : 'Save'}
+                  </button>
                 </div>
-                
-                <button 
-                  type="button" 
-                  onClick={handleSaveAccountSettings}
-                  disabled={savingAccount}
-                  className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                >
-                  {savingAccount ? (
-                    <>
-                      <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                        <circle className="opacity-75" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" strokeDasharray="60" strokeDashoffset="15" fill="none" />
-                      </svg>
-                      Saving...
-                    </>
-                  ) : (
-                    'Save Account Settings'
-                  )}
-                </button>
-              </>
-            )}
-          </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -444,6 +433,29 @@ export default function Settings({ onBack, activeTab = 'account' }) {
       {activeTabState === 'metrics' && (
         <div className="max-w-4xl mx-auto bg-white rounded-lg shadow p-6">
           <h2 className="text-lg font-semibold mb-4">Metric Settings for Summary Cards</h2>
+          
+          {savedAccounts.length === 0 ? (
+            <div className="text-center py-12 bg-gray-50 rounded-lg">
+              <p className="text-gray-500">Add at least one Klaviyo account in Account Settings first.</p>
+            </div>
+          ) : (
+          <>
+          <div className="mb-6">
+            <label className="block text-sm font-medium text-gray-700 mb-2">Select account to configure metrics</label>
+            <select
+              value={metricsAccountId || savedAccounts[0]?.id || ''}
+              onChange={(e) => {
+                const id = e.target.value || null;
+                setMetricsAccountId(id);
+                if (id) loadMetrics(id);
+              }}
+              className="border border-gray-300 rounded-lg px-4 py-2 min-w-[240px]"
+            >
+              {savedAccounts.map(acc => (
+                <option key={acc.id} value={acc.id}>{acc.accountName || acc.publicApiKey || acc.id}</option>
+              ))}
+            </select>
+          </div>
           
           {loadingMetrics ? (
             <div className="flex items-center justify-center h-32">
@@ -563,9 +575,11 @@ export default function Settings({ onBack, activeTab = 'account' }) {
               type="submit" 
               className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
             >
-              Save Mapping
+              Save Mapping for {savedAccounts.find(a => a.id === metricsAccountId)?.accountName || 'Account'}
             </button>
           </form>
+          )}
+          </>
           )}
         </div>
       )}

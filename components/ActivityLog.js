@@ -46,7 +46,8 @@ export default function ActivityLog({ profile, onClose }) {
     
     const loadEvents = async () => {
       try {
-        const url = `/api/events?profile_id=${profile.id}&page_size=50`;
+        let url = `/api/events?profile_id=${profile.id}&page_size=50`;
+        if (profile.accountId) url += `&account_id=${encodeURIComponent(profile.accountId)}`;
         const response = await fetch(url);
         const data = await response.json();
         
@@ -89,13 +90,16 @@ export default function ActivityLog({ profile, onClose }) {
     
     const loadProfileStats = async () => {
       try {
-        // Load metric mapping from server
-        const mappingResponse = await fetch('/api/settings/metric-mapping');
+        // Load metric mapping for this profile's account
+        const mappingUrl = profile.accountId
+          ? `/api/settings/metric-mapping?account_id=${encodeURIComponent(profile.accountId)}`
+          : '/api/settings/metric-mapping';
+        const mappingResponse = await fetch(mappingUrl);
         let mapping = {};
         
         if (mappingResponse.ok) {
           const mappingData = await mappingResponse.json();
-          mapping = mappingData.mapping || {};
+          mapping = mappingData.mapping || (profile.accountId ? mappingData.byAccount?.[profile.accountId] : mappingData.byAccount?.__default__) || {};
         } else {
           // If no mapping exists, use empty object (will be filled with defaults)
           console.log('No metric mapping found, using defaults');
@@ -137,92 +141,33 @@ export default function ActivityLog({ profile, onClose }) {
           lastSMSClickedCount: 0
         };
         
-        // Load events for each mapped metric ID separately
+        // Load events for each mapped metric ID separately.
+        // Metric IDs are account-specific - if a metric doesn't exist in an account (e.g. TK shopify vs DEMO),
+        // Klaviyo returns 400. We treat errors as "no events" rather than failing the whole load.
         const eventsByMetric = {};
-        
-        // Load received stats
-        if (mapping.received) {
-          const eventsResponse = await fetch(`/api/events?profile_id=${profile.id}&metric_id=${mapping.received}&page_size=10`);
-          const eventsData = await eventsResponse.json();
-          
-          if (eventsData.error) {
-            console.error('Error loading received events:', eventsData.error);
-            throw new Error(`Failed to load received events: ${eventsData.error}`);
+        const accountParam = profile.accountId ? `&account_id=${encodeURIComponent(profile.accountId)}` : '';
+
+        const fetchEventsForMetric = async (metricId) => {
+          try {
+            const res = await fetch(`/api/events?profile_id=${profile.id}&metric_id=${metricId}&page_size=10${accountParam}`);
+            const data = await res.json();
+            if (data.error || !res.ok) {
+              console.warn(`Metric ${metricId} not available for this account:`, data.error || res.status);
+              return [];
+            }
+            return data.data || [];
+          } catch (e) {
+            console.warn(`Error fetching events for metric ${metricId}:`, e);
+            return [];
           }
-          
-          const events = eventsData.data || [];
-          eventsByMetric[mapping.received] = events;
-        }
-        
-        // Load opened stats
-        if (mapping.opened) {
-          const eventsResponse = await fetch(`/api/events?profile_id=${profile.id}&metric_id=${mapping.opened}&page_size=10`);
-          const eventsData = await eventsResponse.json();
-          
-          if (eventsData.error) {
-            console.error('Error loading opened events:', eventsData.error);
-            throw new Error(`Failed to load opened events: ${eventsData.error}`);
-          }
-          
-          const events = eventsData.data || [];
-          eventsByMetric[mapping.opened] = events;
-        }
-        
-        // Load clicked stats
-        if (mapping.clicked) {
-          const eventsResponse = await fetch(`/api/events?profile_id=${profile.id}&metric_id=${mapping.clicked}&page_size=10`);
-          const eventsData = await eventsResponse.json();
-          
-          if (eventsData.error) {
-            console.error('Error loading clicked events:', eventsData.error);
-            throw new Error(`Failed to load clicked events: ${eventsData.error}`);
-          }
-          
-          const events = eventsData.data || [];
-          eventsByMetric[mapping.clicked] = events;
-        }
-        
-        // Load order stats
-        if (mapping.placedOrder) {
-          const eventsResponse = await fetch(`/api/events?profile_id=${profile.id}&metric_id=${mapping.placedOrder}&page_size=10`);
-          const eventsData = await eventsResponse.json();
-          
-          if (eventsData.error) {
-            console.error('Error loading order events:', eventsData.error);
-            throw new Error(`Failed to load order events: ${eventsData.error}`);
-          }
-          
-          const events = eventsData.data || [];
-          eventsByMetric[mapping.placedOrder] = events;
-        }
-        
-        // Load SMS received stats
-        if (mapping.smsReceived) {
-          const eventsResponse = await fetch(`/api/events?profile_id=${profile.id}&metric_id=${mapping.smsReceived}&page_size=10`);
-          const eventsData = await eventsResponse.json();
-          
-          if (eventsData.error) {
-            console.error('Error loading SMS received events:', eventsData.error);
-            throw new Error(`Failed to load SMS received events: ${eventsData.error}`);
-          }
-          
-          const events = eventsData.data || [];
-          eventsByMetric[mapping.smsReceived] = events;
-        }
-        
-        // Load SMS clicked stats
-        if (mapping.smsClicked) {
-          const eventsResponse = await fetch(`/api/events?profile_id=${profile.id}&metric_id=${mapping.smsClicked}&page_size=10`);
-          const eventsData = await eventsResponse.json();
-          
-          if (eventsData.error) {
-            console.error('Error loading SMS clicked events:', eventsData.error);
-            throw new Error(`Failed to load SMS clicked events: ${eventsData.error}`);
-          }
-          
-          const events = eventsData.data || [];
-          eventsByMetric[mapping.smsClicked] = events;
-        }
+        };
+
+        if (mapping.received) eventsByMetric[mapping.received] = await fetchEventsForMetric(mapping.received);
+        if (mapping.opened) eventsByMetric[mapping.opened] = await fetchEventsForMetric(mapping.opened);
+        if (mapping.clicked) eventsByMetric[mapping.clicked] = await fetchEventsForMetric(mapping.clicked);
+        if (mapping.placedOrder) eventsByMetric[mapping.placedOrder] = await fetchEventsForMetric(mapping.placedOrder);
+        if (mapping.smsReceived) eventsByMetric[mapping.smsReceived] = await fetchEventsForMetric(mapping.smsReceived);
+        if (mapping.smsClicked) eventsByMetric[mapping.smsClicked] = await fetchEventsForMetric(mapping.smsClicked);
         
         // Get stats for each metric type
         if (mapping.received && eventsByMetric[mapping.received]) {
@@ -454,8 +399,11 @@ export default function ActivityLog({ profile, onClose }) {
             </button>
             <h2 className="text-xl font-semibold text-gray-800">Activity Log</h2>
           </div>
-          <div className="text-sm text-gray-500">
-            {profile.email}
+          <div className="flex flex-col items-end text-sm">
+            {profile.accountName && (
+              <span className="text-gray-500 mb-1">Account: {profile.accountName}</span>
+            )}
+            <span className="text-gray-500">{profile.email}</span>
           </div>
         </div>
 

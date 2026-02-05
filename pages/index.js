@@ -24,6 +24,11 @@ export default function Dashboard() {
     clicked: null,
     placedOrder: null,
   });
+  const [accounts, setAccounts] = useState([]);
+  const [selectedAccountIds, setSelectedAccountIds] = useState([]);
+  const [accountCursors, setAccountCursors] = useState({});
+  const [accountNextCursors, setAccountNextCursors] = useState({});
+  const [multiAccountCursorStack, setMultiAccountCursorStack] = useState([]);
 
   // Navigation state
   const [currentView, setCurrentView] = useState('dashboard');
@@ -41,33 +46,105 @@ export default function Dashboard() {
     }
   }, []);
 
-  // Fetch profiles function
-  const fetchProfilesPage = async ({ page_size = 25, page_cursor = null, search = '' } = {}) => {
+  // Load accounts and default to all selected
+  useEffect(() => {
+    axios.get('/api/account-settings')
+      .then(res => {
+        const accts = res.data?.accounts || [];
+        setAccounts(accts);
+        if (accts.length > 0 && selectedAccountIds.length === 0) {
+          setSelectedAccountIds(accts.map(a => a.id));
+        }
+      })
+      .catch(() => setAccounts([]));
+  }, [currentView]);
+
+  // Fetch profiles function - supports single or multi-account
+  const fetchProfilesPage = async ({ page_size = 25, page_cursor = null, cursors = null, search = '' } = {}) => {
+    const ids = selectedAccountIds;
+    if (ids.length === 0) {
+      setProfiles([]);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     try {
-      let url = `/api/profiles?page_size=${page_size}`;
-      if (page_cursor) url += `&page_cursor=${encodeURIComponent(page_cursor)}`;
-      if (search) url += `&search=${encodeURIComponent(search)}`;
-      url += '&additional-fields[profile]=subscriptions,predictive_analytics';
-      
-      const res = await axios.get(url);
-      const data = res.data;
-      
-      const processedProfiles = (data.data || []).map(profile => {
-        const pa = profile.attributes.predictive_analytics || {};
-        return {
-          id: profile.id,
-          email: profile.attributes.email,
-          phone_number: profile.attributes.phone_number || '',
-          subscriptions: profile.attributes.subscriptions,
-          totalValue: pa.historic_clv || null,
-          totalOrders: pa.historic_number_of_orders || null,
-        };
-      });
-      
-      setProfiles(processedProfiles);
-      setNextCursor(data.nextCursor || null);
-      setTotalProfiles(data.total || null);
+      if (ids.length === 1) {
+        // Single account - use existing logic
+        let url = `/api/profiles?page_size=${page_size}`;
+        url += `&account_id=${encodeURIComponent(ids[0])}`;
+        if (page_cursor) url += `&page_cursor=${encodeURIComponent(page_cursor)}`;
+        if (search) url += `&search=${encodeURIComponent(search)}`;
+        url += '&additional-fields[profile]=subscriptions,predictive_analytics';
+
+        const res = await axios.get(url);
+        const data = res.data;
+
+        const processedProfiles = (data.data || []).map(profile => {
+          const pa = profile.attributes?.predictive_analytics || {};
+          return {
+            id: profile.id,
+            email: profile.attributes?.email,
+            phone_number: profile.attributes?.phone_number || '',
+            subscriptions: profile.attributes?.subscriptions,
+            totalValue: pa.historic_clv || null,
+            totalOrders: pa.historic_number_of_orders || null,
+            accountId: profile._accountId || ids[0],
+            accountName: profile._accountName || null,
+          };
+        });
+
+        setProfiles(processedProfiles);
+        setNextCursor(data.nextCursor || null);
+        setAccountNextCursors({ [ids[0]]: data.nextCursor || null });
+        setTotalProfiles(data.total || null);
+      } else {
+        // Multi-account - fetch from each in parallel and merge
+        const perAccountSize = Math.max(10, Math.ceil(page_size / ids.length));
+        const fetches = ids.map(accId => {
+          const cursor = cursors?.[accId] || page_cursor;
+          let url = `/api/profiles?page_size=${perAccountSize}&account_id=${encodeURIComponent(accId)}`;
+          if (cursor) url += `&page_cursor=${encodeURIComponent(cursor)}`;
+          if (search) url += `&search=${encodeURIComponent(search)}`;
+          url += '&additional-fields[profile]=subscriptions,predictive_analytics';
+          return axios.get(url).then(r => ({ accountId: accId, data: r.data }));
+        });
+
+        const results = await Promise.all(fetches);
+        const nextCursors = {};
+        let total = 0;
+        const allProfiles = [];
+
+        results.forEach(({ accountId, data }) => {
+          nextCursors[accountId] = data.nextCursor || null;
+          total += data.total || 0;
+          const account = accounts.find(a => a.id === accountId);
+          const accountName = account?.accountName || account?.publicApiKey || accountId;
+          (data.data || []).forEach(profile => {
+            const pa = profile.attributes?.predictive_analytics || {};
+            allProfiles.push({
+              id: profile.id,
+              email: profile.attributes?.email,
+              phone_number: profile.attributes?.phone_number || '',
+              subscriptions: profile.attributes?.subscriptions,
+              totalValue: pa.historic_clv || null,
+              totalOrders: pa.historic_number_of_orders || null,
+              accountId,
+              accountName,
+            });
+          });
+        });
+
+        // Sort merged profiles by email
+        allProfiles.sort((a, b) => (a.email || '').localeCompare(b.email || ''));
+
+        setProfiles(allProfiles);
+        setAccountNextCursors(nextCursors);
+        setNextCursor(Object.values(nextCursors).some(c => c) ? 'multi' : null);
+        setTotalProfiles(total);
+      }
+
       setLoading(false);
       setErrorMsg('');
     } catch (err) {
@@ -76,17 +153,25 @@ export default function Dashboard() {
     }
   };
 
-  // Initial load
+  // Initial load and when accounts selection changes
   useEffect(() => {
-    if (currentView === 'dashboard') {
-      fetchProfilesPage({ page_size: pageSize });
+    if (currentView === 'dashboard' && selectedAccountIds.length > 0) {
+      const cursors = selectedAccountIds.length > 1 ? accountCursors : null;
+      fetchProfilesPage({ page_size: pageSize, cursors, page_cursor: selectedAccountIds.length === 1 ? currentCursor : null });
     }
-  }, [currentView]);
+  }, [currentView, selectedAccountIds, accounts.length]);
+
+  const ids = selectedAccountIds;
+  const isMultiAccount = ids.length > 1;
+  const hasNextPage = isMultiAccount ? Object.values(accountNextCursors).some(c => c) : !!nextCursor;
+  const hasPrevPage = isMultiAccount ? multiAccountCursorStack.length > 0 : cursorStack.length > 0;
 
   // Search handler
   const handleSearch = () => {
     setCursorStack([]);
+    setMultiAccountCursorStack([]);
     setCurrentCursor(null);
+    setAccountCursors({});
     setCurrentPage(1);
     fetchProfilesPage({ page_size: pageSize, search: searchQuery });
   };
@@ -97,27 +182,48 @@ export default function Dashboard() {
     setPageSize(25);
     setCurrentPage(1);
     setCursorStack([]);
+    setMultiAccountCursorStack([]);
+    setCurrentCursor(null);
+    setAccountCursors({});
     fetchProfilesPage({ page_size: 25, page_cursor: null, search: '' });
   };
 
   // Pagination handlers
   const goToNextPage = () => {
-    if (!nextCursor) return;
-    const newStack = [...cursorStack, currentCursor];
-    setCursorStack(newStack);
-    setCurrentCursor(nextCursor);
-    setCurrentPage(currentPage + 1);
-    fetchProfilesPage({ page_size: pageSize, page_cursor: nextCursor, search: searchQuery });
+    if (isMultiAccount) {
+      if (!Object.values(accountNextCursors).some(c => c)) return;
+      setMultiAccountCursorStack([...multiAccountCursorStack, { ...accountCursors }]);
+      setAccountCursors(accountNextCursors);
+      setCurrentPage(currentPage + 1);
+      fetchProfilesPage({ page_size: pageSize, cursors: accountNextCursors, search: searchQuery });
+    } else {
+      if (!nextCursor) return;
+      const newStack = [...cursorStack, currentCursor];
+      setCursorStack(newStack);
+      setCurrentCursor(nextCursor);
+      setCurrentPage(currentPage + 1);
+      fetchProfilesPage({ page_size: pageSize, page_cursor: nextCursor, search: searchQuery });
+    }
   };
 
   const goToPrevPage = () => {
-    if (cursorStack.length === 0) return;
-    const newStack = [...cursorStack];
-    const prevCursor = newStack.pop();
-    setCursorStack(newStack);
-    setCurrentCursor(prevCursor);
-    setCurrentPage(currentPage - 1);
-    fetchProfilesPage({ page_size: pageSize, page_cursor: prevCursor, search: searchQuery });
+    if (isMultiAccount) {
+      if (multiAccountCursorStack.length === 0) return;
+      const newStack = [...multiAccountCursorStack];
+      const prevCursors = newStack.pop();
+      setMultiAccountCursorStack(newStack);
+      setAccountCursors(prevCursors);
+      setCurrentPage(currentPage - 1);
+      fetchProfilesPage({ page_size: pageSize, cursors: prevCursors, search: searchQuery });
+    } else {
+      if (cursorStack.length === 0) return;
+      const newStack = [...cursorStack];
+      const prevCursor = newStack.pop();
+      setCursorStack(newStack);
+      setCurrentCursor(prevCursor);
+      setCurrentPage(currentPage - 1);
+      fetchProfilesPage({ page_size: pageSize, page_cursor: prevCursor, search: searchQuery });
+    }
   };
 
   // Page size handler
@@ -125,7 +231,20 @@ export default function Dashboard() {
     setPageSize(newSize);
     setCurrentPage(1);
     setCursorStack([]);
+    setMultiAccountCursorStack([]);
+    setAccountCursors({});
     fetchProfilesPage({ page_size: newSize, search: searchQuery });
+  };
+
+  const toggleAccountSelection = (accountId) => {
+    setSelectedAccountIds(prev => {
+      const next = prev.includes(accountId) ? prev.filter(id => id !== accountId) : [...prev, accountId];
+      return next;
+    });
+    setCursorStack([]);
+    setMultiAccountCursorStack([]);
+    setAccountCursors({});
+    setCurrentPage(1);
   };
 
   // Get consent status and badge class
@@ -197,6 +316,24 @@ export default function Dashboard() {
         {/* Search Section */}
         <div className="mb-6 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
           <div className="flex flex-col gap-2 w-full">
+            {accounts.length > 1 && (
+              <div className="flex flex-wrap items-center gap-3 mb-2 p-3 bg-gray-50 rounded-lg">
+                <span className="text-sm font-medium text-gray-700">Accounts</span>
+                <div className="flex flex-wrap gap-4">
+                  {accounts.map(acc => (
+                    <label key={acc.id} className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={selectedAccountIds.includes(acc.id)}
+                        onChange={() => toggleAccountSelection(acc.id)}
+                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span className="text-sm text-gray-700">{acc.accountName || acc.publicApiKey || acc.id}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2 w-full">
               <div className="flex gap-2 items-center w-full sm:w-auto">
                 <input 
@@ -240,7 +377,7 @@ export default function Dashboard() {
                 </select>
                 <button 
                   onClick={goToPrevPage}
-                  disabled={cursorStack.length === 0 || loading}
+                  disabled={!hasPrevPage || loading}
                   className="px-4 py-2 border border-gray-300 rounded-lg bg-white text-gray-700 hover:bg-blue-50 transition disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Prev
@@ -248,7 +385,7 @@ export default function Dashboard() {
                 <span className="mx-2 text-gray-700">Page <span className="font-semibold">{currentPage}</span></span>
                 <button 
                   onClick={goToNextPage}
-                  disabled={!nextCursor || loading}
+                  disabled={!hasNextPage || loading}
                   className="px-4 py-2 border border-gray-300 rounded-lg bg-white text-gray-700 hover:bg-blue-50 transition disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Next
@@ -263,6 +400,9 @@ export default function Dashboard() {
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-blue-50">
               <tr>
+                {(accounts.length > 1 || ids.length > 1) && (
+                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Account</th>
+                )}
                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Email</th>
                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">Phone</th>
                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">SMS Consent</th>
@@ -275,7 +415,7 @@ export default function Dashboard() {
             <tbody className="bg-white divide-y divide-gray-100">
               {loading ? (
                 <tr>
-                  <td colSpan="7" className="py-16">
+                  <td colSpan={(accounts.length > 1 || ids.length > 1) ? 8 : 7} className="py-16">
                     <div className="flex flex-col items-center justify-center w-full h-full">
                       <svg className="animate-spin h-8 w-8 text-blue-600 mb-2" viewBox="0 0 24 24">
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
@@ -286,11 +426,11 @@ export default function Dashboard() {
                 </tr>
               ) : errorMsg ? (
                 <tr>
-                  <td colSpan="7" className="py-16 text-center text-red-600">{errorMsg}</td>
+                  <td colSpan={(accounts.length > 1 || ids.length > 1) ? 8 : 7} className="py-16 text-center text-red-600">{errorMsg}</td>
                 </tr>
               ) : profiles.length === 0 ? (
                 <tr>
-                  <td colSpan="7" className="py-16 text-center text-gray-400">No profiles found</td>
+                  <td colSpan={(accounts.length > 1 || ids.length > 1) ? 8 : 7} className="py-16 text-center text-gray-400">No profiles found</td>
                 </tr>
               ) : (
                 profiles.map((profile, idx) => {
@@ -298,7 +438,12 @@ export default function Dashboard() {
                   const { smsConsent, smsBadgeClass } = getSMSConsentStatus(profile);
                   
                   return (
-                    <tr key={profile.id} className="hover:bg-blue-50 transition">
+                    <tr key={`${profile.accountId}-${profile.id}`} className="hover:bg-blue-50 transition">
+                      {(accounts.length > 1 || ids.length > 1) && (
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
+                          {profile.accountName || '—'}
+                        </td>
+                      )}
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                         <a 
                           href={`https://www.klaviyo.com/profile/${profile.id}`} 

@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { getPrivateApiKey } from '../../lib/utils';
+import { getPrivateApiKey, getAccountById, getAllAccounts } from '../../lib/utils';
 
 function extractCursor(nextUrl) {
   try {
@@ -16,8 +16,8 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // Get the private API key from saved settings
-  const privateApiKey = getPrivateApiKey();
+  const account_id = req.query.account_id || req.query.accountId || null;
+  const privateApiKey = getPrivateApiKey(account_id);
   
   if (!privateApiKey) {
     return res.status(500).json({ 
@@ -58,14 +58,24 @@ export default async function handler(req, res) {
     const nextCursor = data.links && data.links.next ? extractCursor(data.links.next) : null;
     const prevCursor = data.links && data.links.prev ? extractCursor(data.links.prev) : null;
     const total = data.meta && data.meta.total ? data.meta.total : null;
+    const account = account_id ? getAccountById(account_id) : (getAllAccounts()[0] || null);
+    const effectiveAccountId = account_id || account?.id || null;
+    const accountLabel = account?.accountName || account?.publicApiKey || account?.id || account_id || null;
+    const profilesWithAccount = (data.data || []).map(p => ({
+      ...p,
+      _accountId: effectiveAccountId,
+      _accountName: accountLabel
+    }));
     console.log('Klaviyo API links:', data.links);
     console.log('Backend nextCursor:', nextCursor, 'prevCursor:', prevCursor);
-    console.log(`Fetched ${data.data.length} profiles on this page. nextCursor:`, nextCursor);
+    console.log(`Fetched ${profilesWithAccount.length} profiles on this page. nextCursor:`, nextCursor);
     res.json({
-      data: data.data,
+      data: profilesWithAccount,
       nextCursor,
       prevCursor,
       total,
+      accountId: account_id,
+      accountName: accountLabel,
     });
   } catch (err) {
     console.error('Error fetching Klaviyo profiles:', err.stack || err);
